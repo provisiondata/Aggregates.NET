@@ -10,18 +10,17 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace Aggregates.Internal
 {
+    // somewhat from https://github.com/WilliamBZA/NServicebus.SimpleInjector/blob/master/src/NServiceBus.SimpleInjector/SimpleInjectorObjectBuilder.cs
     [ExcludeFromCodeCoverage]
     class Container : IContainer, IDisposable
     {
         private readonly SimpleInjector.Container _container;
-        private readonly Dictionary<Type, List<SimpleInjector.Registration>> _namedCollections;
         private readonly bool _child;
 
         public Container(SimpleInjector.Container container, bool child=false)
         {
             _container = container;
             _child = child;
-            _namedCollections = new Dictionary<Type, List<SimpleInjector.Registration>>();
 
             // No support for child containers, but the scoped lifestyle can kind of due to trick
             AsyncScopedLifestyle.BeginScope(_container);
@@ -51,60 +50,99 @@ namespace Aggregates.Internal
         public void Register(Type concrete, Contracts.Lifestyle lifestyle)
         {
             if (_child) return;
-            _container.Register(concrete, concrete, ConvertLifestyle(lifestyle));
+            
+            var registration = ConvertLifestyle(lifestyle).CreateRegistration(concrete, _container);
+            addRegistration(concrete, registration);
         }
-        public void Register<TInterface>(TInterface instance, Contracts.Lifestyle lifestyle) where TInterface : class
+        public void Register(Type service, object instance, Contracts.Lifestyle lifestyle)
         {
             if (_child) return;
-            _container.Register<TInterface>(() => instance, ConvertLifestyle(lifestyle));
+            var registration = ConvertLifestyle(lifestyle).CreateRegistration(service, () => instance, _container);
+            addRegistration(service, registration);
+        }
+        public void Register<TInterface>(TInterface instance, Contracts.Lifestyle lifestyle)
+        {
+            if (_child) return;
+            var registration = ConvertLifestyle(lifestyle).CreateRegistration(typeof(TInterface), () => instance, _container);
+            addRegistration(typeof(TInterface), registration);
         }
 
-        public void Register<TInterface>(Func<IContainer, TInterface> factory, Contracts.Lifestyle lifestyle, string name = null) where TInterface : class
+        public void Register<TInterface>(Func<IContainer, TInterface> factory, Contracts.Lifestyle lifestyle, string name = null)
         {
             if (_child) return;
 
-            // Trick to accomplish what named instances are meant to - registering multiple of the same interface.
-            if (!string.IsNullOrEmpty(name))
+            var registration = ConvertLifestyle(lifestyle).CreateRegistration(typeof(TInterface), () => factory(this), _container);
+
+            addRegistration(typeof(TInterface), registration);
+
+        }
+        public void Register<TInterface, TConcrete>(Contracts.Lifestyle lifestyle, string name = null)
+        {
+            if (_child) return;
+
+            var registration = ConvertLifestyle(lifestyle).CreateRegistration(typeof(TConcrete), _container);
+            addRegistration(typeof(TInterface), registration);
+        }
+        private void addRegistration(Type serviceType, Registration registration)
+        {
+            if (HasComponent(serviceType))
             {
-                if (!_namedCollections.ContainsKey(typeof(TInterface)))
-                    _namedCollections[typeof(TInterface)] = new List<SimpleInjector.Registration>();
+                var existingRegistrations = GetExistingRegistrationsFor(serviceType);
 
-                _namedCollections[typeof(TInterface)].Add(ConvertLifestyle(lifestyle).CreateRegistration<TInterface>(() => factory(this), _container));
-
-                _container.Collection.Register<TInterface>(_namedCollections[typeof(TInterface)]);
-                return;
+                _container.Collection.Register(serviceType, existingRegistrations.Union(new[] { registration }));
             }
-            _container.Register(() => factory(this), ConvertLifestyle(lifestyle));
+            else
+                _container.AddRegistration(serviceType, registration);
+
+            RegisterInterfaces(serviceType, registration.Lifestyle);
         }
-        public void Register<TInterface, TConcrete>(Contracts.Lifestyle lifestyle, string name = null) where TInterface : class where TConcrete : class, TInterface
+        private void RegisterInterfaces(Type component, SimpleInjector.Lifestyle lifestyle)
         {
-            if (_child) return;
+            var registration = lifestyle.CreateRegistration(component, _container);
 
-            // Trick to accomplish what named instances are meant to - registering multiple of the same interface.
-            if (!string.IsNullOrEmpty(name))
-            {
-                if (!_namedCollections.ContainsKey(typeof(TInterface)))
-                    _namedCollections[typeof(TInterface)] = new List<SimpleInjector.Registration>();
-
-                _namedCollections[typeof(TInterface)].Add(ConvertLifestyle(lifestyle).CreateRegistration<TConcrete>( _container));
-
-                _container.Collection.Register<TInterface>(_namedCollections[typeof(TInterface)]);
-                return;
-            }
-            _container.Register<TInterface, TConcrete>(ConvertLifestyle(lifestyle));
+            var interfaces = component.GetInterfaces();
+            foreach (var serviceType in interfaces)
+                addRegistration(serviceType, registration);
+        }
+        public bool HasService(Type service)
+        {
+            return HasComponent(service);
         }
 
         public object Resolve(Type resolve)
         {
+            if (!HasComponent(resolve))
+            {
+                throw new ActivationException($"The requested type {resolve.FullName} is not registered yet");
+            }
+
             return _container.GetInstance(resolve);
         }
-        public TResolve Resolve<TResolve>() where TResolve : class
+        public TResolve Resolve<TResolve>()
         {
-            return _container.GetInstance<TResolve>();
+            return (TResolve)Resolve(typeof(TResolve));
         }
-        public IEnumerable<TResolve> ResolveAll<TResolve>() where TResolve : class
+        public IEnumerable<TResolve> ResolveAll<TResolve>()
         {
-            return _container.GetAllInstances<TResolve>();
+            return ResolveAll(typeof(TResolve)).Cast<TResolve>();
+        }
+        public IEnumerable<object> ResolveAll(Type resolve)
+        {
+            if (HasComponent(resolve))
+            {
+
+                try
+                {
+                    return _container.GetAllInstances(resolve);
+                }
+                catch (Exception)
+                {
+                    // Urgh!
+                    return new[] { _container.GetInstance(resolve) };
+                }
+            }
+
+            return new object[] { };
         }
         public object TryResolve(Type resolve)
         {
@@ -117,18 +155,39 @@ namespace Aggregates.Internal
                 return null;
             }
         }
-        public TResolve TryResolve<TResolve>() where TResolve : class
+        public TResolve TryResolve<TResolve>()
         {
             try
             {
-                return _container.GetInstance<TResolve>();
+                return (TResolve)_container.GetInstance(typeof(TResolve));
             }
             catch (ActivationException)
             {
-                return null;
+                return default(TResolve);
             }
         }
+        public bool HasComponent(Type componentType)
+        {
+            return GetExistingRegistrationsFor(componentType).Any();
+        }
+        IEnumerable<Registration> GetExistingRegistrationsFor(Type implementedInterface)
+        {
+            return _container.GetCurrentRegistrations().Where(r => r.ServiceType == implementedInterface).Select(r => r.Registration);
+        }
+        Registration GetRegistrationFromDependencyLifecycle(Contracts.Lifestyle dependencyLifecycle, Type component)
+        {
+            return ConvertLifestyle(dependencyLifecycle).CreateRegistration(component, _container);
+        }
 
+        Registration GetRegistrationFromDependencyLifecycle(Contracts.Lifestyle dependencyLifecycle, Type component, Func<object> creator)
+        {
+            return ConvertLifestyle(dependencyLifecycle).CreateRegistration(component, creator, _container);
+        }
+
+        Registration GetRegistrationFromDependencyLifecycle(Contracts.Lifestyle dependencyLifecycle, Type component, object instance)
+        {
+            return GetRegistrationFromDependencyLifecycle(dependencyLifecycle, component, () => instance);
+        }
         public IContainer GetChildContainer()
         {
             return new Container(_container, child: true);

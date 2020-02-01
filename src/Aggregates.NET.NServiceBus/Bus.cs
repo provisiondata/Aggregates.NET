@@ -26,10 +26,10 @@ namespace Aggregates
         internal static PushRuntimeSettings PushSettings;
         internal static bool BusOnline;
 
-        public static async Task<IEndpointInstance> Start(EndpointConfiguration configuration)
+        public static async Task<IEndpointInstance> Start(IStartableEndpointWithExternallyManagedContainer nsb)
         {
             BusOnline = false;
-            Instance = await global::NServiceBus.Endpoint.Start(configuration).ConfigureAwait(false);
+            Instance = await nsb.Start(new Internal.ContainerAdapter()).ConfigureAwait(false);
             // Take IEndpointInstance and pull out the info we need for eventstore consuming
 
             // We want eventstore to push message directly into NSB
@@ -78,14 +78,18 @@ namespace Aggregates
                     main.GetType()
                         .GetField("recoverabilityExecutor", BindingFlags.Instance | BindingFlags.NonPublic)
                         .GetValue(main);
-                var mainPipeline = pipelineExecutor
-                                    .GetType()
-                                    .GetField("mainPipeline", BindingFlags.Instance | BindingFlags.NonPublic)
-                                    .GetValue(pipelineExecutor);
-                var behaviors = mainPipeline
-                                    .GetType()
-                                    .GetField("behaviors", BindingFlags.Instance | BindingFlags.NonPublic)
-                                    .GetValue(mainPipeline) as IBehavior[];
+
+                // NSB changed these fields around 7.2 and I dont want to spend the time putting this back in (yet)
+                //var tempType = pipelineExecutor
+                //                    .GetType();
+                //var mainPipeline = pipelineExecutor
+                //                    .GetType()
+                //                    .GetField("receivePipeline", BindingFlags.Instance | BindingFlags.NonPublic)
+                //                    .GetValue(pipelineExecutor);
+                //var behaviors = mainPipeline
+                //                    .GetType()
+                //                    .GetField("behaviors", BindingFlags.Instance | BindingFlags.NonPublic)
+                //                    .GetValue(mainPipeline) as IBehavior[];
 
                 var pipelineMethod = pipelineExecutor.GetType().GetMethod("Invoke", BindingFlags.Instance | BindingFlags.Public)
                     .MakeFuncDelegateWithTarget<MessageContext, Task>(pipelineExecutor.GetType());
@@ -104,8 +108,8 @@ namespace Aggregates
 
                 Logger.InfoEvent("Online", "NServiceBus is online");
 
-                for(var i = 0; i < behaviors.Length; i++)
-                    Logger.DebugEvent("PipelineStep", "{Index}: {StepType}", i, behaviors[i].GetType().FullName);
+                //for(var i = 0; i < behaviors.Length; i++)
+                //    Logger.DebugEvent("PipelineStep", "{Index}: {StepType}", i, behaviors[i].GetType().FullName);
 
                 BusOnline = true;
                 return Instance;

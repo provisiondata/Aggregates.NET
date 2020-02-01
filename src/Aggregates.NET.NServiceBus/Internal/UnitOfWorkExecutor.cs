@@ -78,15 +78,17 @@ namespace Aggregates.Internal
                 _metrics.Increment("Messages Concurrent", Unit.Message);
                 using (_metrics.Begin("Message Duration"))
                 {
-                    
-                    await commitableUow.Begin().ConfigureAwait(false);
+                    if(context.Message.Instance is Messages.ICommand)
+                        await commitableUow.Begin().ConfigureAwait(false);
+
                     if (commitableAppUow != null)
                         await commitableAppUow.Begin().ConfigureAwait(false);
                     await delayed.Begin().ConfigureAwait(false);
                     
                     await next().ConfigureAwait(false);
-                    
-                    await commitableUow.End().ConfigureAwait(false);
+
+                    if (context.Message.Instance is Messages.ICommand)
+                        await commitableUow.End().ConfigureAwait(false);
                     if (commitableAppUow != null)
                         await commitableAppUow.End().ConfigureAwait(false);
                     await delayed.End().ConfigureAwait(false);
@@ -102,7 +104,8 @@ namespace Aggregates.Internal
                 try
                 {
                     // Todo: if one throws an exception (again) the others wont work.  Fix with a loop of some kind
-                    await commitableUow.End(e).ConfigureAwait(false);
+                    if (context.Message.Instance is Messages.ICommand)
+                        await commitableUow.End(e).ConfigureAwait(false);
                     if (appUOW != null)
                     {
                         await commitableAppUow.End(e).ConfigureAwait(false);
@@ -135,11 +138,11 @@ namespace Aggregates.Internal
     [ExcludeFromCodeCoverage]
     internal class UowRegistration : RegisterStep
     {
-        public UowRegistration(IContainer container) : base(
+        public UowRegistration() : base(
             stepId: "UnitOfWorkExecution",
             behavior: typeof(UnitOfWorkExecutor),
             description: "Begins and Ends unit of work for your application",
-            factoryMethod: (b) => new UnitOfWorkExecutor(container.Resolve<IMetrics>())
+            factoryMethod: (b) => new UnitOfWorkExecutor(b.Build<IMetrics>())
         )
         {
             InsertAfterIfExists("ExceptionRejector");

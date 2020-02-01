@@ -10,6 +10,10 @@ using System.Text;
 using NServiceBus.Transport;
 using System.Threading.Tasks;
 using System.Diagnostics.CodeAnalysis;
+using NServiceBus.MessageInterfaces;
+using NServiceBus.Settings;
+using NServiceBus.Unicast.Messages;
+using NServiceBus.Unicast;
 
 namespace Aggregates
 {
@@ -18,6 +22,8 @@ namespace Aggregates
     {
         public static Configure NServiceBus(this Configure config, EndpointConfiguration endpointConfig)
         {
+            IStartableEndpointWithExternallyManagedContainer startableEndpoint = null;
+
             {
                 var settings = endpointConfig.GetSettings();
                 var conventions = endpointConfig.Conventions();
@@ -44,11 +50,13 @@ namespace Aggregates
 
                 container.Register(factory => new Aggregates.Internal.DelayedRetry(factory.Resolve<IMetrics>(), factory.Resolve<IMessageDispatcher>()), Lifestyle.Singleton);
 
-                return Task.CompletedTask;
-            });
+                container.Register<IEventMapper>((factory) => new EventMapper(factory.Resolve<IMessageMapper>()), Lifestyle.Singleton);
 
-            config.SetupTasks.Add((c) =>
-            {
+                container.Register<UnitOfWork.IDomain>((factory) => new NSBUnitOfWork(factory.Resolve<IRepositoryFactory>(), factory.Resolve<IEventFactory>(), factory.Resolve<IVersionRegistrar>()), Lifestyle.UnitOfWork);
+                container.Register<IEventFactory>((factory) => new EventFactory(factory.Resolve<IMessageMapper>()), Lifestyle.Singleton);
+                container.Register<IMessageDispatcher>((factory) => new Dispatcher(factory.Resolve<IMetrics>(), factory.Resolve<IMessageSerializer>(), factory.Resolve<IEventMapper>(), factory.Resolve<IVersionRegistrar>()), Lifestyle.Singleton);
+                container.Register<IMessaging>((factory) => new NServiceBusMessaging(factory.Resolve<MessageHandlerRegistry>(), factory.Resolve<MessageMetadataRegistry>(), factory.Resolve<ReadOnlySettings>()), Lifestyle.Singleton);
+
                 var settings = endpointConfig.GetSettings();
 
                 settings.Set("Retries", config.Retries);
@@ -72,7 +80,16 @@ namespace Aggregates
                 // NSB doesn't have an endpoint name setter other than the constructor, hack it in
                 settings.Set("NServiceBus.Routing.EndpointName", c.Endpoint);
 
-                return Aggregates.Bus.Start(endpointConfig);
+                startableEndpoint = EndpointWithExternallyManagedContainer.Create(endpointConfig, new Internal.ContainerAdapter());
+
+                return Task.CompletedTask;
+            });
+
+            // Split creating the endpoint and starting the endpoint into 2 seperate jobs for certain (MICROSOFT) DI setup
+
+            config.SetupTasks.Add((c) =>
+            {
+                return Aggregates.Bus.Start(startableEndpoint);
             });
 
             return config;

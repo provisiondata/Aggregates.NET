@@ -1,11 +1,14 @@
 ﻿using Aggregates.Contracts;
+using StructureMap.Pipeline;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Linq;
 using System.Text;
 
 namespace Aggregates.Internal
 {
+    // somewhat from https://github.com/Particular/NServiceBus.StructureMap/blob/master/src/NServiceBus.StructureMap/StructureMapObjectBuilder.cs
     [ExcludeFromCodeCoverage]
     class Container : IContainer
     {
@@ -38,53 +41,99 @@ namespace Aggregates.Internal
 
         public void Register(Type concrete, Contracts.Lifestyle lifestyle)
         {
-            _container.Configure(x => x.For(concrete).Use(concrete).SetLifecycleTo(ConvertLifestyle(lifestyle)));
+            _container.Configure(x =>
+            {
+                x.For(concrete).Use(concrete).SetLifecycleTo(ConvertLifestyle(lifestyle));
+
+                foreach (var implementedInterface in GetAllInterfacesImplementedBy(concrete))
+                {
+                    x.For(implementedInterface).Use(c => c.GetInstance(concrete));
+                }
+            });
         }
-        public void Register<TInterface>(TInterface instance, Contracts.Lifestyle lifestyle) where TInterface : class
+        public void Register(Type serviceType, object instance, Contracts.Lifestyle lifestyle)
         {
-            _container.Configure(x => x.For<TInterface>().Use(instance).SetLifecycleTo(ConvertLifestyle(lifestyle)));
+            _container.Configure(x =>
+            {
+                x.For(serviceType).Use(instance).SetLifecycleTo(ConvertLifestyle(lifestyle));
+
+                foreach (var implementedInterface in GetAllInterfacesImplementedBy(serviceType))
+                {
+                    x.For(implementedInterface).Use(c => c.GetInstance(serviceType));
+                }
+            });
+        }
+        public void Register<TInterface>(TInterface instance, Contracts.Lifestyle lifestyle)
+        {
+            _container.Configure(x =>
+            {
+                x.For<TInterface>().Use(() => instance).SetLifecycleTo(ConvertLifestyle(lifestyle));
+
+                foreach (var implementedInterface in GetAllInterfacesImplementedBy(typeof(TInterface)))
+                {
+                    x.For(implementedInterface).Use(c => c.GetInstance<TInterface>());
+                }
+            });
         }
 
-        public void Register<TInterface>(Func<IContainer, TInterface> factory, Contracts.Lifestyle lifestyle, string name = null) where TInterface : class
+        public void Register<TInterface>(Func<IContainer, TInterface> factory, Contracts.Lifestyle lifestyle, string name = null)
         {
+
             _container.Configure(x =>
             {
                 var use = x.For<TInterface>().Use(y => factory(this));
                 if (!string.IsNullOrEmpty(name))
                     use.Named(name);
                 use.SetLifecycleTo(ConvertLifestyle(lifestyle));
+
+                foreach (var implementedInterface in GetAllInterfacesImplementedBy(typeof(TInterface)))
+                {
+                    x.For(implementedInterface).Use(c => c.GetInstance<TInterface>());
+                }
             });
         }
-        public void Register<TInterface, TConcrete>(Contracts.Lifestyle lifestyle, string name = null) where TInterface : class where TConcrete : class, TInterface
+        public void Register<TInterface, TConcrete>(Contracts.Lifestyle lifestyle, string name = null)
         {
             _container.Configure(x =>
             {
-                var use = x.For<TInterface>().Use<TConcrete>();
+                var use = x.For(typeof(TInterface)).Use(typeof(TConcrete));
                 if (!string.IsNullOrEmpty(name))
                     use.Named(name);
                 use.SetLifecycleTo(ConvertLifestyle(lifestyle));
             });
+        }
+        public bool HasService(Type componentType)
+        {
+            return _container.Model.PluginTypes.Any(t => t.PluginType == componentType);
         }
 
         public object Resolve(Type resolve)
         {
             return _container.GetInstance(resolve);
         }
-        public TResolve Resolve<TResolve>() where TResolve : class
+        public TResolve Resolve<TResolve>()
         {
             return _container.GetInstance<TResolve>();
         }
-        public IEnumerable<TResolve> ResolveAll<TResolve>() where TResolve : class
+        public IEnumerable<TResolve> ResolveAll<TResolve>()
         {
             return _container.GetAllInstances<TResolve>();
+        }
+        public IEnumerable<object> ResolveAll(Type service)
+        {
+            return (IEnumerable<object>)_container.GetAllInstances(service);
         }
         public object TryResolve(Type resolve)
         {
             return _container.TryGetInstance(resolve);
         }
-        public TResolve TryResolve<TResolve>() where TResolve : class
+        public TResolve TryResolve<TResolve>()
         {
             return _container.TryGetInstance<TResolve>();
+        }
+        static IEnumerable<Type> GetAllInterfacesImplementedBy(Type t)
+        {
+            return t.GetInterfaces().Where(x => !x.FullName.StartsWith("System."));
         }
 
         public IContainer GetChildContainer()

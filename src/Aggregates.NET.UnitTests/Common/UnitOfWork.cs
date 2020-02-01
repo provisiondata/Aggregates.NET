@@ -45,9 +45,22 @@ namespace Aggregates.Common
             Inject<IRepository<FakeEntity>>(repo);
 
             Sut.For<FakeEntity>();
+            Sut.CommitId = Guid.NewGuid();
             await (Sut as Aggregates.UnitOfWork.IUnitOfWork).End().ConfigureAwait(false);
 
             repo.CommitCalled.Should().BeTrue();
+        }
+        [Fact]
+        public async Task ShouldNotCommitIfNoCommitId()
+        {
+            var repo = new FakeRepository();
+            Inject<IRepository<FakeEntity>>(repo);
+
+            Sut.For<FakeEntity>();
+            Sut.CommitId = Guid.Empty;
+
+            var e = await Record.ExceptionAsync(() => (Sut as Aggregates.UnitOfWork.IUnitOfWork).End()).ConfigureAwait(false);
+            e.Should().BeOfType<InvalidOperationException>();
         }
         [Fact]
         public async Task ShouldNotCommitOnEndWithException()
@@ -68,6 +81,7 @@ namespace Aggregates.Common
             Inject<IRepository<FakeEntity>>(repo);
 
             Sut.For<FakeEntity>();
+            Sut.CommitId = Guid.NewGuid();
             await (Sut as Aggregates.UnitOfWork.IUnitOfWork).End().ConfigureAwait(false);
 
             repo.PrepareCalled.Should().BeTrue();
